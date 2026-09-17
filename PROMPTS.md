@@ -3,9 +3,9 @@
 > 本文件反映**当前实际生效**的提示词（含配置里的和硬编码在服务端的）。
 > 随时可自查：
 > ```bash
-> node tools/ask-server.mjs --dry-run --mode define    # 解释这个词
-> node tools/ask-server.mjs --dry-run --mode explain   # 解释这段
-> node tools/ask-server.mjs --dry-run --mode qa        # 自由追问
+> node ask-server.mjs --dry-run --mode define    # 解释这个词
+> node ask-server.mjs --dry-run --mode explain   # 解释这段
+> node ask-server.mjs --dry-run --mode qa        # 自由追问
 > ```
 > 输出会打印完整拼装结果（system + 上下文 + 问题）和字符数。
 

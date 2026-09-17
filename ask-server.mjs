@@ -34,6 +34,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 // 它与「工作区」（课程内容所在目录）是解耦的，由 --workspace 或配置指定。
 const TOOL_DIR = HERE
 const CONFIG_PATH = path.join(HERE, 'ask.config.json')
+// 本机覆盖层。主配置 ask.config.json 是给公开仓库用的「中性模板」，
+// 不该出现任何本机路径；工作区指向属于本机信息，一律落在这个文件里。
+// 该文件已在 .gitignore 中（见「密钥」一节），不会进版本库。
+const LOCAL_PATH = path.join(HERE, 'ask.config.local.json')
 
 /* ------------------------------------------------------------------ */
 /* 配置                                                                */
@@ -46,36 +50,83 @@ const opt = (name) => {
   return i >= 0 ? argv[i + 1] : undefined
 }
 
+/**
+ * 主配置文件的**原始**内容。持久化时以它为准，而不是运行期的 cfg ——
+ * 否则会把 --workspace / 本地覆盖层解析出来的**本机绝对路径**写回 ask.config.json，
+ * 那正好就是「公开仓库里出现作者本机路径」的成因。
+ */
+let FILE_CFG = {}
+
+/** 读本地覆盖层；不存在或坏了都当空对象，不阻塞启动。 */
+function readLocal() {
+  try {
+    const o = JSON.parse(fs.readFileSync(LOCAL_PATH, 'utf8').replace(/^\uFEFF/, ''))
+    return o && typeof o === 'object' ? o : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 只改 workspace 一个字段，其余原样保留（本地文件可能被手工加过别的键）。 */
+function writeLocalWorkspace(ws) {
+  const cur = readLocal()
+  cur._readme =
+    '本机覆盖层，优先级高于 ask.config.json（--workspace 命令行参数仍最高）。' +
+    '已在 .gitignore 中，不会进版本库 —— 本机路径就该放这里。'
+  cur.workspace = ws
+  fs.writeFileSync(LOCAL_PATH, JSON.stringify(cur, null, 2) + '\n', 'utf8')
+}
+
+/**
+ * 合成运行期配置。优先级：命令行 > 本地覆盖层 > 主配置 > 上级目录兜底（兼容旧布局）。
+ * `_workspaceSource` 只用于界面提示「这个值是哪来的」，不写回文件。
+ */
+function buildRuntime(fileCfg) {
+  const out = JSON.parse(JSON.stringify(fileCfg))
+  const localWs = String(readLocal().workspace || '').trim()
+  const cliWs = opt('workspace')
+  out.port = Number(opt('port') || out.port || 8899)
+  out.provider = opt('provider') || out.provider || 'api'
+  out._workspaceSource = cliWs ? 'cli' : localWs ? 'local' : out.workspace ? 'config' : 'fallback'
+  out.workspace = path.resolve(cliWs || localWs || out.workspace || path.resolve(HERE, '..'))
+  return out
+}
+
+/** 就地替换运行期配置对象（cfg 被很多闭包按引用持有，不能整个换掉） */
+function replaceCfg(next) {
+  for (const k of Object.keys(cfg)) delete cfg[k]
+  Object.assign(cfg, next)
+}
+
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
     console.error(`[ask] 找不到配置文件：${CONFIG_PATH}`)
     process.exit(1)
   }
   const raw = fs.readFileSync(CONFIG_PATH, 'utf8')
-  let cfg
+  let parsed
   try {
-    cfg = JSON.parse(raw.replace(/^\uFEFF/, ''))
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, ''))
   } catch (e) {
     console.error(`\n[ask] tools/ask.config.json 不是合法 JSON：${e.message}`)
     console.error('      常见原因：用了 JS 的数组语法 [...]、.join() 或 // 注释。')
     console.error('      这是纯 JSON 文件：长文本要写成一行字符串，换行用 \\n 转义。\n')
     process.exit(1)
   }
-  cfg.port = Number(opt('port') || cfg.port || 8899)
-  cfg.provider = opt('provider') || cfg.provider || 'api'
-  // 工作区（课程内容所在）：命令行 > 配置 > 兼容旧布局（工具的上级目录）
-  cfg.workspace = path.resolve(opt('workspace') || cfg.workspace || path.resolve(HERE, '..'))
-  return cfg
+  FILE_CFG = JSON.parse(JSON.stringify(parsed))
+  return buildRuntime(FILE_CFG)
 }
 
 const cfg = loadConfig()
-const ROOT = cfg.workspace // 工作区根：lessons / MISSION.md / reference 都在这里
+// 工作区根：lessons / MISSION.md / reference / assets 都在这里。
+// 用 let —— 它可以在运行期被 /api/workspace 热切换（读了 ROOT 的地方会自然拿到新值）。
+let ROOT = cfg.workspace
 const TOKEN = crypto.randomBytes(16).toString('hex')
 
 // PDF 阅读模块：与 HTML lesson 链路完全分离，由 ask.config.json 的 pdf.enabled 控制。
 // 关掉它时 /pdf 返回 404、目录里不出现文献、首页也没有入口 —— 等于回到纯 HTML 状态。
 const pdfReader = createPdfReader({
-  ROOT,
+  getRoot: () => ROOT,
   TOOL_DIR,
   getConfig: () => cfg,
   getToken: () => TOKEN,
@@ -936,6 +987,102 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => HTML_ESC[c])
 }
 
+/* ------------------------------------------------------------------ */
+/* 工作区（课程目录）                                                    */
+/* ------------------------------------------------------------------ */
+
+const isDirSafe = (p) => {
+  try {
+    return fs.statSync(p).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 把用户填的路径解析成工作区根。
+ *
+ * 容错是刻意的：用户脑子里的「课程目录」既可能是工作区（含 lessons/），
+ * 也可能就是 lessons/ 本身，甚至更深的分类目录。向上最多找 4 层，
+ * 谁含有 lessons/ 子目录谁就是工作区。
+ * 但猜不出来时**原样采纳、不做「看起来像」的自动纠正** —— 宁可显示空列表，
+ * 也不要莫名其妙把工作区改到别的目录上去。
+ */
+function resolveWorkspace(raw) {
+  const text = String(raw || '').trim().replace(/^["']|["']$/g, '')
+  if (!text) return { error: '请填写课程目录的路径' }
+  const abs = path.resolve(text)
+  if (!fs.existsSync(abs)) return { error: '这个路径不存在：' + abs }
+  if (!isDirSafe(abs)) return { error: '这不是一个目录：' + abs }
+
+  let cur = abs
+  for (let i = 0; i < 4; i++) {
+    if (isDirSafe(path.join(cur, 'lessons'))) {
+      return { root: cur, note: cur === abs ? '' : `已自动上溯到工作区：${cur}` }
+    }
+    const up = path.dirname(cur)
+    if (up === cur) break
+    cur = up
+  }
+  return { root: abs, note: '这个目录里还没有 lessons/ 子目录，先按工作区使用' }
+}
+
+/** 当前工作区的体检结果，首页与设置页共用 */
+async function workspaceInfo() {
+  const lessonsDir = path.join(ROOT, 'lessons')
+  const hints = {
+    exists: fs.existsSync(ROOT),
+    lessons: isDirSafe(lessonsDir),
+    mission: fs.existsSync(path.join(ROOT, 'MISSION.md')),
+    lessonCss: fs.existsSync(path.join(ROOT, 'assets', 'lesson.css')),
+  }
+  // 三者有其一就算「像样的工作区」；全无则首页给醒目提示
+  const valid = hints.exists && (hints.lessons || hints.mission || hints.lessonCss)
+  let lessonCount = 0
+  try {
+    lessonCount = (await getCatalog()).filter((c) => c.kind !== 'pdf').length
+  } catch {
+    lessonCount = 0
+  }
+  const sourceLabel = {
+    cli: '命令行 --workspace 指定（优先级最高）',
+    local: 'ask.config.local.json（本机覆盖层）',
+    config: 'ask.config.json',
+    fallback: '未指定，退回工具目录的上一级',
+  }[cfg._workspaceSource] || '未知'
+  return {
+    workspace: ROOT,
+    source: cfg._workspaceSource || 'unknown',
+    sourceLabel,
+    valid,
+    hints,
+    lessonCount,
+    lessonsDir,
+  }
+}
+
+/**
+ * 切换工作区：写本地覆盖层 → 更新运行期 ROOT → 清掉两个缓存。
+ * **绝不写 ask.config.json** —— 那是要进公开仓库的中性模板。
+ */
+async function setWorkspace(raw) {
+  const r = resolveWorkspace(raw)
+  if (r.error) return { error: r.error }
+  writeLocalWorkspace(r.root)
+  replaceCfg(buildRuntime(FILE_CFG))
+  // 命令行 --workspace 优先级最高，此时 ROOT 仍是命令行给的那个（下面会出提示）
+  ROOT = cfg.workspace
+  catalogCache = { at: 0, data: null }
+  pdfReader.invalidate() // 相对路径来源（如「参考文献」）要按新工作区重解析
+  const info = await workspaceInfo()
+  if (info.source === 'cli') {
+    info.warning =
+      '本次启动用 --workspace 指定了工作区，它优先级最高；去掉该参数重启后本地设置才生效。'
+  }
+  if (r.note) info.note = r.note
+  return info
+}
+
 /**
  * 扫一遍工作区，列出「含 PDF 的目录」和「所有 PDF 文件」。
  * 只为了在首页的添加面板里给可点选的候选，省得手打路径。最多下钻 3 层。
@@ -971,7 +1118,7 @@ async function scanPdfCandidates() {
   return { dirs: dirsFound, files: pdfFiles }
 }
 
-function indexPage(catalog, token) {
+function indexPage(catalog, token, pdfEnabled = false) {
   // 按分类分组展示
   const groups = []
   for (const c of catalog) {
@@ -982,39 +1129,62 @@ function indexPage(catalog, token) {
     }
     g.items.push(c)
   }
+  // 文献分组**空也建**。原先是「有文献才渲染分组」，而添加入口挂在分组标题上 ——
+  // 等于没有任何文献时就没有分组、没有入口，第一篇永远加不进来（鸡生蛋）。
+  if (pdfEnabled && !groups.some((g) => g.id === pdfReader.PDF_CATEGORY)) {
+    groups.push({
+      id: pdfReader.PDF_CATEGORY,
+      label: cfg.pdf?.categoryLabel || '文献',
+      items: [],
+    })
+  }
 
-  const listHTML = groups.length
-    ? groups
-        .map((g) => {
-          const lis = g.items
-            .map((c) => {
-              const tag = c.kind === 'pdf' ? 'PDF' : c.num ? 'Lesson ' + c.num : 'Lesson'
-              return (
-                `<li><a href="${c.url}"><span class="n">${escapeHtml(tag)}</span>` +
-                `<span class="h">${escapeHtml(c.heading || c.title)}</span></a></li>`
-              )
-            })
-            .join('\n')
-          const isPdf = g.items.some((c) => c.kind === 'pdf')
-          // 文献分组用「篇」，课程分组用「课」；文献分组还多一个「添加」入口
-          const unit = isPdf ? '篇' : '课'
-          const cntId = isPdf ? ' id="pdf-count"' : ''
-          const ulId = isPdf ? ' id="pdf-list"' : ''
-          const addBtn = isPdf ? '　<button type="button" id="pdf-add">＋ 添加文献</button>' : ''
-          return (
-            `<section><h2 class="cat">${escapeHtml(g.label)}` +
-            `<span class="cnt"${cntId}>${g.items.length} ${unit}</span>${addBtn}</h2>\n` +
-            `<ul${ulId}>\n${lis}\n</ul></section>`
-          )
-        })
-        .join('\n')
-    : '<p class="empty">还没有 lesson。把 HTML 放进 <code>lessons/</code> 就会出现；<br>放进 <code>lessons/&lt;分类名&gt;/</code> 则会自动归到那个分类下。</p>'
+  // 「还没有课程」的引导必须独立于分组是否存在：文献分组现在是常驻的，
+  // 若把它挂在 groups.length 上，0 课程时用户只会看到一个空的文献分组，
+  // 完全看不出该去哪填课程目录。
+  const hasLessons = catalog.some((c) => c.kind !== 'pdf')
+  const noLessonHint = hasLessons
+    ? ''
+    : '<p class="empty">还没有课程。把上面的「课程目录」填成 <code>lessons/</code> 所在的那一层，这里就会出现课程；' +
+      '课程 HTML 放进 <code>lessons/</code> 或 <code>lessons/&lt;分类名&gt;/</code>。</p>'
+
+  const listHTML =
+    noLessonHint +
+    (groups.length
+      ? groups
+          .map((g) => {
+            const lis = g.items.length
+              ? g.items
+                  .map((c) => {
+                    const tag = c.kind === 'pdf' ? 'PDF' : c.num ? 'Lesson ' + c.num : 'Lesson'
+                    return (
+                      `<li><a href="${c.url}"><span class="n">${escapeHtml(tag)}</span>` +
+                      `<span class="h">${escapeHtml(c.heading || c.title)}</span></a></li>`
+                    )
+                  })
+                  .join('\n')
+              : '<li class="blank">还没有文献。点上面的「＋ 添加文献」，绑定一个目录或添加单篇即可。</li>'
+            const isPdf = g.id === pdfReader.PDF_CATEGORY || g.items.some((c) => c.kind === 'pdf')
+            // 文献分组用「篇」，课程分组用「课」；文献分组还多一个「添加」入口
+            const unit = isPdf ? '篇' : '课'
+            const cntId = isPdf ? ' id="pdf-count"' : ''
+            const ulId = isPdf ? ' id="pdf-list"' : ''
+            const addBtn = isPdf ? '　<button type="button" id="pdf-add">＋ 添加文献</button>' : ''
+            return (
+              `<section><h2 class="cat">${escapeHtml(g.label)}` +
+              `<span class="cnt"${cntId}>${g.items.length} ${unit}</span>${addBtn}</h2>\n` +
+              `<ul${ulId}>\n${lis}\n</ul></section>`
+            )
+          })
+          .join('\n')
+      : '')
 
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>教学工坊 · 目录</title>
 <style>
-:root{--ink:#1a1a1a;--ink-2:#4a4a4a;--ink-3:#767676;--rule:#d8d5cd;--paper:#fdfcfa;--accent:#8c2f1f;--box:#f4f2ed}
+:root{--ink:#1a1a1a;--ink-2:#4a4a4a;--ink-3:#767676;--rule:#d8d5cd;--paper:#fdfcfa;--accent:#8c2f1f;--box:#f4f2ed;
+--warn:#8a5a12;--warn-soft:#faf0dd;--hi:#1d5c48}
 *{box-sizing:border-box}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Songti SC",serif;font-size:17px;line-height:1.68}
 .wrap{max-width:720px;margin:0 auto;padding:64px 28px 96px}
@@ -1041,6 +1211,34 @@ font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 .tip{margin-top:34px;font-size:13.5px;color:var(--ink-3);font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 .tip a{display:inline;padding:0;color:var(--accent)}
 kbd{font-family:ui-monospace,Menlo,monospace;background:var(--box);border:1px solid var(--rule);border-radius:3px;padding:1px 5px;font-size:12px}
+/* ---- 课程目录（工作区）入口 ---- */
+.wsbar{display:flex;align-items:baseline;gap:10px;margin:24px 0 0;padding:9px 13px;border:1px solid var(--rule);
+border-radius:6px;background:var(--box);font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:12.5px}
+.wsbar .wsk{flex:0 0 auto;color:var(--ink-3)}
+.wsbar .wsv{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-2)}
+.wsbar .wsc{flex:0 0 auto;color:var(--ink-3);font-size:11.5px}
+.wsbar button{flex:0 0 auto;background:none;border:1px solid var(--rule);border-radius:4px;font-family:inherit;
+font-size:11.5px;color:var(--ink-2);cursor:pointer;padding:2px 9px}
+.wsbar button:hover{border-color:var(--accent);color:var(--accent);background:#f6edea}
+.wsbar.bad{border-style:dashed;border-color:#e2c9a8;background:var(--warn-soft)}
+.wsbar.bad .wsk{color:var(--warn);font-size:14px;line-height:1}
+.wsbar.bad .wsv{color:var(--warn);font-family:inherit;font-size:12.5px;white-space:normal;overflow:visible}
+.wsform{display:flex;gap:8px;margin:9px 0 0}
+.wsform[hidden]{display:none}
+.wsform input{flex:1;min-width:0;border:1px solid var(--rule);border-radius:5px;padding:7px 10px;
+font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:var(--ink);background:#fff;outline:none}
+.wsform input:focus{border-color:var(--accent)}
+.wsform button{flex:0 0 auto;background:var(--accent);color:var(--paper);border:0;border-radius:5px;
+padding:7px 15px;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:12.5px;cursor:pointer}
+.wsform button:hover{background:#7a2819}
+.wsform button.ghost{background:none;color:var(--ink-3);border:1px solid var(--rule)}
+.wsform button.ghost:hover{background:var(--box);color:var(--ink)}
+.wsnote{font-size:12px;color:var(--ink-3);margin:7px 0 0;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wsnote.err{color:var(--accent)}
+.wsnote.warn{color:var(--warn)}
+ul li.blank{color:var(--ink-3);font-size:12.5px;padding:11px 4px;
+font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 /* ---- 文献来源管理 ---- */
 #pdf-add{background:none;border:1px dashed var(--rule);border-radius:4px;font-family:inherit;
 font-size:11.5px;font-weight:400;color:var(--accent);cursor:pointer;padding:2px 8px;margin-left:4px}
@@ -1095,6 +1293,15 @@ overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </div>
 <a class="set" href="/config" title="切换 AI 线路、填 API Key、改提示词">&#9881; 设置</a>
 </div>
+
+<div class="wsbar" id="wsbar"></div>
+<div class="wsform" id="wsform" hidden>
+<input id="ws-input" placeholder="填 lessons/ 所在的那一层，例如 D:/Project/我的课程；也可以直接填 lessons/">
+<button type="button" id="ws-save">绑定</button>
+<button type="button" class="ghost" id="ws-cancel">取消</button>
+</div>
+<p class="wsnote" id="ws-note"></p>
+
 ${listHTML}
 <p class="tip">快捷键：<kbd>Ctrl</kbd>+<kbd>K</kbd> 打开提问抽屉 · <kbd>Esc</kbd> 关闭 · 选中文字后按 <kbd>Ctrl</kbd>+<kbd>K</kbd> 直接针对选区提问</p>
 <p class="tip">其它页面（如 <a href="/reference/glossary.html">reference/glossary.html</a>）访问时，提问组件同样会自动注入。</p>
@@ -1137,7 +1344,9 @@ ${listHTML}
   var TOKEN = ${JSON.stringify(token)};
   var modal = document.getElementById('pdf-modal');
   var btn = document.getElementById('pdf-add');
-  if (!modal || !btn) return;
+  // 注意：只判 modal，不判 btn —— 按钮理论上常驻，但用 pdf.enabled=false 关掉文献
+  // 功能时它不会渲染，此时这块脚本仍要能正常结束，不能把整段拖死。
+  if (!modal) return;
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -1249,6 +1458,102 @@ ${listHTML}
 })();
 </script>
 
+<script>
+/* 课程目录（工作区）入口。与上面的文献面板相互独立：文献是「往里加来源」，
+   这个是「整个工作区指到哪」—— 后者决定 lessons/、MISSION.md、assets/lesson.css
+   从哪读，所以它没配好时首页会一片空白，必须给个显眼的入口。 */
+(function () {
+  var TOKEN = ${JSON.stringify(token)};
+  var bar = document.getElementById('wsbar');
+  var form = document.getElementById('wsform');
+  var input = document.getElementById('ws-input');
+  var note = document.getElementById('ws-note');
+  var saveBtn = document.getElementById('ws-save');
+  if (!bar || !form || !input) return;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function say(t, cls) {
+    if (!note) return;
+    note.textContent = t || '';
+    note.className = 'wsnote' + (cls ? ' ' + cls : '');
+  }
+
+  function render(d) {
+    if (d.valid) {
+      bar.className = 'wsbar';
+      bar.innerHTML = '<span class="wsk">课程目录</span>' +
+        '<span class="wsv" title="' + esc(d.workspace) + '">' + esc(d.workspace) + '</span>' +
+        '<span class="wsc">' + (d.lessonCount || 0) + ' 课</span>' +
+        '<button type="button" id="ws-toggle">更换</button>';
+      form.hidden = true;
+      input.value = d.workspace || '';
+      var t = document.getElementById('ws-toggle');
+      if (t) {
+        t.addEventListener('click', function () {
+          form.hidden = !form.hidden;
+          if (!form.hidden) input.focus();
+        });
+      }
+    } else {
+      bar.className = 'wsbar bad';
+      bar.innerHTML = '<span class="wsk">&#9888;</span>' +
+        '<span class="wsv">还没有指定课程目录，所以这里看不到任何课程。</span>' +
+        '<span class="wsc">填在下面</span>';
+      form.hidden = false;
+      input.value = '';
+    }
+    var msg = [];
+    if (d.warning) msg.push(d.warning);
+    if (d.note) msg.push(d.note);
+    say(msg.join('　'), d.warning ? 'warn' : '');
+  }
+
+  function load() {
+    fetch('/api/workspace', { headers: { 'x-ask-token': TOKEN } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && !d.error) render(d); })
+      .catch(function (e) { say('读取课程目录失败：' + e.message, 'err'); });
+  }
+
+  function save() {
+    var v = input.value.trim();
+    if (!v) return say('请先填一个路径', 'err');
+    if (saveBtn) saveBtn.disabled = true;
+    say('正在切换…');
+    fetch('/api/workspace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-ask-token': TOKEN },
+      body: JSON.stringify({ path: v })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (saveBtn) saveBtn.disabled = false;
+      if (d.error) return say(d.error, 'err');
+      say('已切换，正在刷新…');
+      // 课程列表、分组、课数、文献都要跟着变 —— 整页重载最稳，别做局部 patch
+      location.reload();
+    }).catch(function (e) {
+      if (saveBtn) saveBtn.disabled = false;
+      say('切换失败：' + e.message, 'err');
+    });
+  }
+
+  if (saveBtn) saveBtn.addEventListener('click', save);
+  var cancel = document.getElementById('ws-cancel');
+  if (cancel) {
+    cancel.addEventListener('click', function () {
+      input.value = '';
+      form.hidden = true;
+      say('');
+    });
+  }
+  input.addEventListener('keydown', function (e) { if (e.key === 'Enter') save(); });
+  load();
+})();
+</script>
+
 </body></html>`
 }
 
@@ -1267,6 +1572,7 @@ function redactKey(k) {
 function redactedConfig() {
   const clone = JSON.parse(JSON.stringify(cfg))
   delete clone._readme
+  delete clone._workspaceSource // 界面提示用，属运行期信息，不属于「配置」
   for (const v of Object.values(clone.providers || {})) {
     if (v && typeof v.apiKey === 'string' && v.apiKey) v.apiKey = redactKey(v.apiKey)
   }
@@ -1282,7 +1588,9 @@ const PATCH_PROVIDER_KEYS = [
 
 /** 只允许改白名单字段；apiKey 传回掩码时视为「不修改」。 */
 function applyConfigPatch(patch) {
-  const next = JSON.parse(JSON.stringify(cfg))
+  // 基线用主配置**原文** FILE_CFG，而不是运行期 cfg —— 后者含运行期才解析出来的
+  // 本机绝对工作区路径与命令行覆盖值，写回文件就等于把本机信息推进公开仓库。
+  const next = JSON.parse(JSON.stringify(FILE_CFG))
 
   if (patch.provider) {
     if (!next.providers[patch.provider]) throw new Error('未知线路：' + patch.provider)
@@ -1324,10 +1632,11 @@ function applyConfigPatch(patch) {
   }
 
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2) + '\n', 'utf8')
+  FILE_CFG = JSON.parse(JSON.stringify(next))
 
-  // 热更新内存配置，省掉重启
-  for (const k of Object.keys(cfg)) delete cfg[k]
-  Object.assign(cfg, next)
+  // 热更新内存配置，省掉重启。走 buildRuntime 是为了让运行期覆盖
+  // （--workspace / ask.config.local.json）在保存后依然生效。
+  replaceCfg(buildRuntime(FILE_CFG))
   return { provider: cfg.provider }
 }
 
@@ -1335,11 +1644,25 @@ function configPage() {
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>划词提问 · 配置</title>
-<link rel="stylesheet" href="/assets/lesson.css">
 <style>
-body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
-.wrap{max-width:760px}
-h2{margin-top:40px}
+/* 本页自带基础层，**不引用工作区的 /assets/lesson.css**。
+   那个文件属于 teach skill（课程组件），工作区没指向课程目录时它不存在，
+   请求会 404 —— 于是 :root 变量和 .wrap/.kicker/h1/h2/.lead 一起失效，
+   整页只剩零散边框，看起来就像「CSS 全没了」。
+   工具自己的页面必须自包含：设置页有没有样式，不该取决于课程放在哪。
+   下面这套 token 与 lesson.css 保持一致，改课程主题时两边要对齐。 */
+:root{--ink:#1a1a1a;--ink-2:#4a4a4a;--ink-3:#767676;--rule:#d8d5cd;--paper:#fdfcfa;
+--accent:#8c2f1f;--accent-soft:#f6edea;--hi:#1d5c48;--hi-soft:#e3f0ea;
+--warn:#8a5a12;--warn-soft:#faf0dd;--box:#f4f2ed}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-size:16px;line-height:1.68;
+font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:760px;margin:0 auto;padding:56px 28px 96px}
+.kicker{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;letter-spacing:.14em;
+text-transform:uppercase;color:var(--accent);margin:0 0 10px}
+h1{font-size:30px;line-height:1.22;font-weight:600;letter-spacing:-.01em;margin:0 0 12px}
+h2{font-size:20px;font-weight:600;margin:44px 0 14px;padding-bottom:7px;border-bottom:1px solid var(--rule)}
+.lead{font-size:17px;color:var(--ink-2);line-height:1.6;margin:0 0 15px}
 fieldset{border:1px solid var(--rule);border-radius:6px;padding:14px 18px;margin:0 0 14px;background:#fff}
 legend{font-size:12.5px;letter-spacing:.02em;color:var(--ink-3);padding:0 6px;font-weight:500}
 label.row{display:block;margin:0 0 12px}
@@ -1363,11 +1686,44 @@ button.save:hover{background:#7a2819}
 button.save:disabled{background:var(--rule);cursor:not-allowed}
 .msg{font-size:13px}.msg.ok{color:var(--hi)}.msg.err{color:var(--accent)}
 .cur{font-size:12.5px;color:var(--ink-3);font-family:ui-monospace,Menlo,monospace}
+/* ---- 工作区块 ---- */
+.fld .k{display:block;font-size:12.5px;color:var(--ink-3);margin-bottom:4px}
+.wsrow{display:flex;gap:8px}
+.wsrow input{flex:1;min-width:0}
+.wsrow button{flex:0 0 auto;background:var(--accent);color:var(--paper);border:0;border-radius:5px;
+padding:0 16px;font-family:inherit;font-size:13.5px;cursor:pointer}
+.wsrow button:hover{background:#7a2819}
+.wsrow button:disabled{background:var(--rule);cursor:not-allowed}
+.wsmeta{font-size:12.5px;color:var(--ink-3);margin:10px 0 0;line-height:1.75}
+.wsmeta code{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-2)}
+.wsmeta .ok{color:var(--hi)}
+.wsmeta .bad{color:var(--accent)}
+.wsn{font-size:12.5px;margin:10px 0 0;padding:9px 12px;border-radius:5px;line-height:1.65}
+.wsn.warn{background:var(--warn-soft);border:1px solid #e8d5ae;color:var(--warn)}
+.wsn.err{background:var(--accent-soft);border:1px solid #e8c9c0;color:var(--accent)}
+.wsn[hidden]{display:none}
 </style></head><body><div class="wrap">
 <p class="kicker">Ask AI · 配置</p>
 <h1>划词提问设置</h1>
 <p class="lead">切换 AI 线路、填写密钥、微调提示词。保存后立即生效（端口改动需重启）。</p>
 <p class="cur" id="cur"></p>
+
+<h2>〇、工作区</h2>
+<fieldset>
+<legend>Workspace</legend>
+<div class="fld">
+<span class="k">课程目录 —— <code>lessons/</code> 所在的那一层</span>
+<span class="wsrow">
+<input type="text" id="wsPath" placeholder="例如 D:/Project/我的课程；也可以直接填 lessons/">
+<button type="button" id="wsSave">保存</button>
+</span>
+<span class="hint">保存后立即生效，不用重启。填 <code>lessons/</code> 或更深的分类目录也可以，会自动上溯到工作区根。
+写入的是工具目录下的 <code>ask.config.local.json</code>（已在 .gitignore 中），
+不会污染要公开的 <code>ask.config.json</code>。</span>
+</div>
+<p class="wsmeta" id="wsMeta"></p>
+<p class="wsn" id="wsNote" hidden></p>
+</fieldset>
 
 <h2>一、AI 线路</h2>
 <div class="provs" id="provs"></div>
@@ -1412,7 +1768,7 @@ button.save:disabled{background:var(--rule);cursor:not-allowed}
 <button class="save" id="save">保存</button>
 <span class="msg" id="msg"></span>
 </div>
-<p class="hint" style="margin-top:0">配置写在 tools/ask.config.json。API Key 只存在服务端进程里，不会下发到页面；显示为掩码时表示「不修改」。</p>
+<p class="hint" style="margin-top:0">配置写在工具的 <code>ask.config.json</code>；工作区这类本机信息写 <code>ask.config.local.json</code>（已 gitignore）。API Key 只存在服务端进程里，不会下发到页面；显示为掩码时表示「不修改」。</p>
 </div>
 
 <script>
@@ -1422,6 +1778,63 @@ var LABELS = {};
 var DESCS = {};
 
 function el(id) { return document.getElementById(id); }
+
+/* ---- 工作区 ---- */
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function wsNote(t, cls) {
+  var n = el('wsNote');
+  if (!t) { n.hidden = true; return; }
+  n.hidden = false;
+  n.className = 'wsn' + (cls ? ' ' + cls : '');
+  n.textContent = t;
+}
+function wsRender(d) {
+  el('wsPath').value = d.workspace || '';
+  var f = [];
+  f.push(d.hints.lessons ? '<span class="ok">lessons/ 有</span>' : '<span class="bad">lessons/ 没有</span>');
+  f.push(d.hints.mission ? '<span class="ok">MISSION.md 有</span>' : '<span class="bad">MISSION.md 没有</span>');
+  f.push(d.hints.lessonCss ? '<span class="ok">assets/lesson.css 有</span>'
+    : '<span class="bad">assets/lesson.css 没有（课程页会没样式）</span>');
+  el('wsMeta').innerHTML =
+    '当前生效：<code>' + escHtml(d.workspace) + '</code><br>' +
+    '来源：' + escHtml(d.sourceLabel) + '　·　识别到课程 ' + (d.lessonCount || 0) + ' 条<br>' +
+    f.join('　·　');
+  if (d.warning) wsNote(d.warning, 'warn');
+  else if (d.note) wsNote(d.note);
+  else wsNote('');
+}
+function wsLoad() {
+  fetch('/api/workspace', { headers: { 'x-ask-token': TOKEN } })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d && !d.error) wsRender(d); })
+    .catch(function (e) { wsNote('读取工作区失败：' + e.message, 'err'); });
+}
+function wsSave() {
+  var v = el('wsPath').value.trim();
+  if (!v) return wsNote('请先填一个路径', 'err');
+  var b = el('wsSave');
+  b.disabled = true;
+  wsNote('正在切换…');
+  fetch('/api/workspace', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-ask-token': TOKEN },
+    body: JSON.stringify({ path: v })
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      b.disabled = false;
+      if (d.error) return wsNote(d.error, 'err');
+      wsRender(d);
+      load(); // 课程目录变了，线路信息里的课数等一起刷新
+    })
+    .catch(function (e) { b.disabled = false; wsNote('保存失败：' + e.message, 'err'); });
+}
+el('wsSave').addEventListener('click', wsSave);
+el('wsPath').addEventListener('keydown', function (e) { if (e.key === 'Enter') wsSave(); });
 
 function load() {
   fetch('/api/config', { headers: { 'x-ask-token': TOKEN } })
@@ -1547,6 +1960,7 @@ el('save').addEventListener('click', function () {
 });
 
 load();
+wsLoad();
 </script></body></html>`
 }
 
@@ -1597,6 +2011,39 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/config' || p === '/config.html') {
     return send(res, 200, configPage(), { 'Content-Type': 'text/html; charset=utf-8' })
+  }
+
+  // 工作区（课程目录）读写 —— 首页「课程目录」入口与设置页共用。
+  // 写入目标是 ask.config.local.json（已 gitignore），绝不碰要公开的 ask.config.json。
+  if (p === '/api/workspace') {
+    if (!tokenOk(req)) return sendJSON(res, 401, { error: 'unauthorized' })
+
+    if (req.method === 'GET') {
+      try {
+        return sendJSON(res, 200, await workspaceInfo())
+      } catch (e) {
+        return sendJSON(res, 500, { error: e.message })
+      }
+    }
+
+    if (req.method === 'POST') {
+      let body
+      try {
+        body = await readBody(req)
+      } catch {
+        return sendJSON(res, 400, { error: 'bad json' })
+      }
+      try {
+        const out = await setWorkspace(body.path)
+        if (out.error) return sendJSON(res, 400, out)
+        console.log(`[ask] 工作区已切换：${ROOT}`)
+        return sendJSON(res, 200, { ok: true, ...out })
+      } catch (e) {
+        return sendJSON(res, 500, { error: e.message })
+      }
+    }
+
+    return sendJSON(res, 405, { error: 'method not allowed' })
   }
 
   // 文献来源管理（首页「添加文献」面板用）
@@ -1656,6 +2103,9 @@ const server = http.createServer(async (req, res) => {
       }
       // 清掉文献索引缓存，让新来源立刻反映到 __DOC_LINKS__ 里
       pdfReader.invalidate()
+      // 课程目录缓存也要清：它把 PDF 条目一起缓存了，不清的话 2 秒内
+      // 再打开首页会拿到「刚加的文献没出现」的旧快照。
+      catalogCache = { at: 0, data: null }
 
       const data = await snapshot()
       data.ok = true
@@ -1764,7 +2214,12 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/' || p === '/index.html') {
     const catalog = await getCatalog()
-    return send(res, 200, indexPage(catalog, TOKEN), { 'Content-Type': 'text/html; charset=utf-8' })
+    return send(
+      res,
+      200,
+      indexPage(catalog, TOKEN, pdfReader.enabled()),
+      { 'Content-Type': 'text/html; charset=utf-8' },
+    )
   }
 
   return serveStatic(req, res, p)

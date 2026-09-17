@@ -13,14 +13,21 @@ git clone https://github.com/OlivaFute/aksanything.git
 cd aksanything
 ```
 
-手要先做两件事（都写在 `ask.config.json`；也可以启动后打开 <http://127.0.0.1:8899/config> 图形化修改）：
+手要先做两件事（**两件都能在页面上点**，不必手改 JSON）：
 
-1. **指定工作区** —— `workspace` 填课程目录的绝对路径（就是 `lessons/` 所在的那一层）。留空时会退回工具目录的上一级。
-2. **配一个 AI 通道** —— 三选一，见下方 provider 表。仓库里的 `providers.api.apiKey` 是**空的**，默认设计成读环境变量，这样 key 永远不会进 Git：
+1. **指定工作区** —— 课程目录的绝对路径（就是 `lessons/` 所在的那一层）。
+   启动后打开 <http://127.0.0.1:8899>，首页顶部就有一条「课程目录」，填进去点绑定，**保存即生效、不用重启**；
+   设置页 <http://127.0.0.1:8899/config> 的「〇、工作区」是同一个入口。
+   填 `lessons/` 本身或更深的分类目录也可以，会自动上溯到工作区根。
+2. **配一个 AI 通道** —— 三选一，见下方 provider 表。在设置页填，或改 `ask.config.json`。仓库里的 `providers.api.apiKey` 是**空的**，默认设计成读环境变量，这样 key 永远不会进 Git：
 
 ```bash
 setx DEEPSEEK_API_KEY "sk-你的key"     # Windows，设完要重开终端
 ```
+
+> **工作区会写在 `ask.config.local.json`，不是 `ask.config.json`。**
+> 前者是本机覆盖层，已在 `.gitignore` 里；后者是要提交的中性模板，`workspace` 永远留空。
+> 页面上改工作区只动本地文件 —— 否则你每 commit 一次，就把自己的 `D:\...` 路径推给别人了。
 
 配好之后双击 **`askanything.bat`**，或手动：
 
@@ -37,11 +44,13 @@ node ask-server.mjs
 2. 返回 HTML 时注入 `ask-ai.js`
 3. 提供 `/api/ask` 流式接口，把上下文拼好再发给 AI
 
-**服务哪个工作区**由 `ask.config.json` 的 `workspace` 字段决定，启动时也可以临时指定：
+**服务哪个工作区**按优先级取：`--workspace` 参数 > `ask.config.local.json` > `ask.config.json` > 工具目录的上一级。启动时临时指定：
 
 ```bash
 node ask-server.mjs --workspace "D:\Project\我的课程"
 ```
+
+工作区没配对时首页会显示一条醒目的提示（而不是只列出一片空白），并在那里给出输入框。
 
 ---
 
@@ -128,7 +137,9 @@ lessons/
 
 打开 <http://127.0.0.1:8899/config>
 
-可以在这里切换 AI 线路、填写 API Key、调整上下文策略、直接编辑三条提示词。**保存后立即热生效**（端口改动需重启），配置写回 `ask.config.json`。
+可以在这里指定工作区（「〇、工作区」，写入 `ask.config.local.json`）、切换 AI 线路、填写 API Key、调整上下文策略、直接编辑三条提示词。**保存后立即热生效**（端口改动需重启），除工作区外的配置写回 `ask.config.json`。
+
+工作区不写 `ask.config.json` 是刻意的：那个文件要提交，而工作区路径只对这一台机器成立。
 
 安全约定：API Key **只存在于服务端进程内存里**，页面上只显示掩码（形如 `sk-a1b2****c3d4`）；提交时保留掩码即表示「不修改」。配置接口同样要求 token。
 
@@ -159,7 +170,7 @@ lessons/
 浏览器桥接首次登录：
 
 ```bash
-node tools/ask-server.mjs --login
+node ask-server.mjs --login
 ```
 
 浏览器会打开，扫码登录后 Ctrl+C 退出即可，之后提问就直接复用登录态。
@@ -185,7 +196,7 @@ node tools/ask-server.mjs --login
 想先看看究竟发了什么给 AI：
 
 ```bash
-node tools/ask-server.mjs --dry-run
+node ask-server.mjs --dry-run
 ```
 
 ---
@@ -216,6 +227,14 @@ node tools/ask-server.mjs --dry-run
 
 ## 常见问题
 
+**首页是空的 / 说「还没有课程」？**
+
+工作区没指对。首页顶部那条「课程目录」就是入口：填上 `lessons/` 所在的那一层（例如 `D:/Project/我的课程`），点绑定，**立刻生效不用重启**。
+
+工作区没配对时，连课程自己的 `../assets/lesson.css` 也会 404（它从工作区读），所以课程页会掉样式 —— 这不是样式文件坏了，是找错了地方。
+
+注意设置页的样式**不依赖工作区**，那种情况下它照常正常显示。
+
 **一定要用 `http://127.0.0.1:8899` 打开吗？**
 
 建议是。原因有三条，任一条都够：
@@ -224,11 +243,11 @@ node tools/ask-server.mjs --dry-run
 2. `file://` 下浏览器读不到文件系统，**列不出课程目录**
 3. 服务端注入意味着新生成的 lesson 自动生效，你不用记得去加 script 标签
 
-如果确实要保留双击打开的习惯，跑一次 `node tools/ask-server.mjs --inject`，它会把 script 标签写进现有 HTML。代价是 `file://` 下拿不到完整课程目录，只能带当前课的上下文（其余功能照常）。
+如果确实要保留双击打开的习惯，跑一次 `node ask-server.mjs --inject`，它会把 script 标签写进现有 HTML。代价是 `file://` 下拿不到完整课程目录，只能带当前课的上下文（其余功能照常）。
 
 **提问报错说找不到输入框？**
 
-浏览器桥接没登录。跑 `node tools/ask-server.mjs --login` 扫码登录一次。
+浏览器桥接没登录。跑 `node ask-server.mjs --login` 扫码登录一次。
 
 **网页改版后桥接失效？**
 
@@ -280,7 +299,8 @@ node tools/ask-server.mjs --dry-run
 <工具目录>\                     ← 工具本体
   askanything.bat              双击启动
   ask-server.mjs               本地服务（零 npm 依赖）
-  ask.config.json              全部配置（含 workspace 指向）
+  ask.config.json              中性配置模板（要提交，workspace 留空）
+  ask.config.local.json        本机覆盖层（已 gitignore）：工作区指向这类本机信息
   selftest.mjs                 自检脚本
   LICENSE / README.md / PROMPTS.md   许可证与文档
   assets/
@@ -302,7 +322,8 @@ node tools/ask-server.mjs --dry-run
     lesson.css / quiz.js       teach skill 自己的组件
 ```
 
-**工作区路径**由 `ask.config.json` 的 `workspace` 字段指定，也可用 `--workspace "路径"` 临时覆盖。
+**工作区路径**由 `ask.config.local.json` 的 `workspace` 决定（首页与设置页都能改，保存即生效），
+也可用 `--workspace "路径"` 临时覆盖 —— 命令行优先级最高。查找顺序见「快速开始」。
 换一个工作区只改这一处，工具代码完全不用动。
 
 组件也按归属分流：`/assets/ask-ai.js` 和 `/assets/katex/*` 由**工具目录**提供，

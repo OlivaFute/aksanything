@@ -2,12 +2,14 @@
  * selftest.mjs — 划词提问组件自检
  *
  * 在已启动 ask-server 的前提下运行：
- *   node tools/selftest.mjs
+ *   node ask-server.mjs        # 另一个窗口先起服务
+ *   node selftest.mjs
  * 截图输出到 .cache/shots/
  *
  * 环境变量：
  *   BASE=...      指定服务地址，默认 http://127.0.0.1:8899
  *   SKIP_AI=1     跳过真实 AI 调用（只验 UI，快）
+ *   CHANNEL=msedge  用本机已装的 Edge，跳过 Chromium 下载
  */
 import path from 'node:path'
 import fs from 'node:fs'
@@ -33,7 +35,13 @@ const check = (name, ok, extra = '') => {
   console.log((ok ? '  PASS  ' : '  FAIL  ') + name + (extra ? '   ' + extra : ''))
 }
 
-const browser = await chromium.launch({ headless: true })
+// CHANNEL=msedge 直接用本机已装的 Edge（Windows 自带），跳过 Chromium 下载。
+// 仓库里不含 Chromium（.cache/ 已 gitignore，首次用桥接时按需下载 ~150MB），
+// 只想跑一遍 UI 自检时用这个能省一次下载。
+const browser = await chromium.launch({
+  headless: true,
+  ...(process.env.CHANNEL ? { channel: process.env.CHANNEL } : {}),
+})
 const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } })
 
 const errors = []
@@ -224,10 +232,20 @@ try {
   await page.locator('.askx-bubble button[data-a="define"]').click()
   await page.waitForTimeout(800)
   await page.evaluate(() => {
+    const TXT = '景深是光学系统能同时保持足够清晰度的物方轴向范围。'
     const b = document.querySelector('.askx-card-body')
-    if (b) b.textContent = '景深是光学系统能同时保持足够清晰度的物方轴向范围。'
+    if (b) b.textContent = TXT
     const t = document.querySelector('.askx-card-title')
     if (t) t.textContent = '景深'
+    // 上面只改了 DOM，**必须同时写进 state**：持久化的 serializeNodes() 取的是
+    // n.brief / n.deep，不看 DOM。SKIP_AI 模式下没有真实回答，不补这一句的话
+    // 「恢复的节点内容仍在」会必然失败 —— 那是自检自己的漏洞，不是产品行为。
+    const ns = window.__askAI.nodes()
+    const n = ns[ns.length - 1]
+    if (n) {
+      n.term = '景深'
+      n.brief = TXT
+    }
   })
   await selectIn('.askx-card-body', '光学系统', 4)
   await page.locator('.askx-bubble button[data-a="define"]').click()

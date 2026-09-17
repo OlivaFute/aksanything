@@ -24,8 +24,14 @@ const escapeHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => 
 /** 内联进 <script> 的 JSON：把 < 转义掉，防止文件名里的 </script> 提前闭合标签 */
 const safeJson = (obj) => JSON.stringify(obj).replace(/</g, '\\u003c')
 
-export function createPdfReader({ ROOT, TOOL_DIR, getConfig, getToken }) {
-  const rootAbs = path.resolve(ROOT)
+/**
+ * @param getRoot 返回当前工作区绝对路径的函数。**必须是 getter 而不是路径字符串** ——
+ *   工作区可以在运行期被 /api/workspace 热切换，这里若把路径拷成常量，
+ *   切完之后相对路径的来源解析还留在旧工作区（表现为「换了工作区但文献没变」）。
+ *   函数体的作用与 createPdfReader 相同，只在 `.replace` 处读当前值。
+ */
+export function createPdfReader({ getRoot, TOOL_DIR, getConfig, getToken }) {
+  const rootAbs = () => path.resolve(getRoot())
 
   const cfg = () => (getConfig() || {}).pdf || {}
   const enabled = () => cfg().enabled !== false
@@ -48,10 +54,10 @@ export function createPdfReader({ ROOT, TOOL_DIR, getConfig, getToken }) {
 
   const isAbs = (p) => path.isAbsolute(p) || /^[a-zA-Z]:[\\/]/.test(p)
   /** 相对路径按工作区解析，绝对路径原样规范化 —— 两种写法都支持 */
-  const absOf = (p) => (isAbs(p) ? path.normalize(p) : path.resolve(path.join(ROOT, String(p))))
+  const absOf = (p) => (isAbs(p) ? path.normalize(p) : path.resolve(path.join(getRoot(), String(p))))
   /** 工作区内的返回相对路径；工作区外的返回归一化绝对路径（一律正斜杠） */
   const relOf = (abs) => {
-    const r = path.relative(rootAbs, abs)
+    const r = path.relative(rootAbs(), abs)
     if (r && !r.startsWith('..') && !path.isAbsolute(r)) return r.split(path.sep).join('/')
     return String(abs).split(path.sep).join('/')
   }
@@ -330,7 +336,7 @@ export function createPdfReader({ ROOT, TOOL_DIR, getConfig, getToken }) {
     let introText = ''
     for (const dir of dirs()) {
       try {
-        introText = await fsp.readFile(path.join(ROOT, dir, introName), 'utf8')
+        introText = await fsp.readFile(path.join(getRoot(), dir, introName), 'utf8')
         break
       } catch {
         /* 这个目录没有，换下一个 */
