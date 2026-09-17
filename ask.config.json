@@ -1,0 +1,96 @@
+{
+  "_readme": "ask-server.mjs 的配置。可改完重启服务，或直接打开 http://127.0.0.1:8899/config 可视化修改。注意：这是纯 JSON，不能用 JS 语法（数组/注释），长文本请用 \\n 转义换行。workspace 指向被服务的教学工作区（课程内容所在目录），也可用 --workspace 参数临时覆盖。",
+  "port": 8899,
+  "openBrowser": true,
+  "provider": "api",
+  "workspace": "",
+  "context": {
+    "_readme": "lessonMode: full=整课全文(推荐) | section=只带当前章节。defineLessonMode 单独控制「解释这个词」的上下文范围，默认 section（字少、网页版桥接更快）。",
+    "includeMission": true,
+    "includeCatalog": true,
+    "lessonMode": "full",
+    "defineLessonMode": "section",
+    "selectionWindow": 700,
+    "maxLessonChars": 60000
+  },
+  "categories": {
+    "_readme": "课程分类。lessons/ 下的一级子目录名 → 展示名（labels）；顶层没有归类的课用 defaultLabel。加新项目只需在 lessons/ 下新建一个目录，无需改代码；该目录里也可以放自己的 MISSION.md，会优先于根目录那份。",
+    "defaultLabel": "未分类",
+    "labels": {}
+  },
+  "pdf": {
+    "_readme": "PDF 阅读功能。enabled=false 时 /pdf 返回 404、目录与首页都不出现文献，等于回到纯 HTML 状态。dirs 是开放阅读的目录（相对工作区，用正斜杠）。textDir 是全文抽取结果所在的子目录，只用来给 AI 提供上下文，不参与页面显示。contextMode 控制发给 AI 的正文粒度：full=整篇（长文献会被 maxLessonChars 截断成错位上下文，慎用）/ page=当前页（推荐）/ paragraph=当前段落。categoryLabel 是首页分组名。",
+    "enabled": true,
+    "dirs": [
+      "参考文献"
+    ],
+    "textDir": "_txt",
+    "contextMode": "page",
+    "categoryLabel": "文献",
+    "files": []
+  },
+  "systemPrompt": "你是这位学习者的一对一老师。他正在读你为他的学习目标编写的 lesson，现在划出了其中一段，想让你解释、定义或回答。\n\n通用要求：\n1. 用中文，直接回应他的要求。不要客套，不要复述他的话。\n2. 回答要紧扣他划出的原文，不要泛泛而谈教科书内容。\n3. 简洁优先。他是在阅读途中看的，一段话能说清就别写三段；确实需要展开时用短列表。\n4. 如果回答本身涉及课内其它章节或术语表，可以直接引用；但不要为了显示关联而强行关联。\n5. 需要公式时用 LaTeX（行内 $...$，独立成行 $$...$$）。\n6. 不确定的地方直接说明不确定，不要编造数据或文献。\n\n如果下面的【要求】或【他的问题】与以上通用要求冲突，以那个更具体的要求为准。",
+  "prompts": {
+    "_readme": "三条提问线路各自的提示词。define = 划词后点「解释这个词」(就地卡片)；explain = 点「解释这段」(进抽屉)；自由提问则用上面的 systemPrompt。",
+    "define": "请给我划出的这个词(或短语)下一个准确的定义。\n\n要求：\n- 第一句就是定义，且必须是完整的句子（该有主语就有主语，例如「景深是…」）。\n- 不要用「这个词是指…」这类铺垫句式，也不要先把这个词单独复述一遍。\n- 接着用 1~2 句补充：它为什么重要，或给一个具体例子、数量级。\n- 全部不超过 120 字。\n- 如果这是本课术语，与课内的用法保持一致。\n- 不要用 Markdown 标题，不要客套。",
+    "defineDeep": "请对划出的这个词(或短语)做一次彻底、深入的讲解。\n\n要求：\n- 先用一句话给出精确定义。\n- 然后展开：它的物理/数学含义、为什么要这样定义、在什么条件下成立或失效。\n- 给出关键公式（LaTeX，行内 $...$ 或独立成行 $$...$$），并逐项解释公式里每个量的含义和量级。\n- 举一个具体例子，最好直接与本课的实际数据挂钩（引用课里的数字）。\n- 指出常见误解，或容易与它混淆的相邻概念，说明区别在哪。\n- 如果与课内其它章节有关联，指出位置。\n- 用小标题或短列表组织，但不要用「首先/其次/总之」这类套话，也不要客套。",
+    "explain": "请深入浅出地解释我划出的这段内容。\n\n要求：\n- 重点是把这段话里的概念和道理真正讲明白，让没有基础的人也能听懂。\n- 可以用类比、具体数字，或者「换句话说」的方式重新表述一遍。\n- 如果有助于理解，可以顺带提到它与课内其它内容的关系，但不强求。\n- 需要公式时用 LaTeX（行内 $...$）。\n- 不要客套，不要复述原文。"
+  },
+  "providers": {
+    "api": {
+      "label": "DeepSeek 官方 API",
+      "_readme": "apiKey 留空则读环境变量 apiKeyEnv。新账号在 platform.deepseek.com 注册送 500 万 token。",
+      "baseUrl": "https://api.deepseek.com",
+      "model": "deepseek-flash",
+      "apiKey": "",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "temperature": 0.3,
+      "maxTokens": 24000
+    },
+    "browser": {
+      "label": "浏览器桥接（chat.deepseek.com 网页版）",
+      "_readme": "首次使用会弹出浏览器，请在该窗口扫码登录一次；登录态存在 userDataDir，之后复用。完全免费。",
+      "url": "https://chat.deepseek.com/",
+      "userDataDir": ".cache/browser-profile",
+      "headless": false,
+      "newChatEachAsk": true,
+      "replyTimeoutMs": 180000,
+      "selectors": {
+        "_readme": "按顺序尝试，第一个命中的生效。改版后可在此覆盖，无需改代码。",
+        "input": [
+          "textarea#chat-input",
+          "textarea",
+          "div[contenteditable='true'][role='textbox']",
+          "div[contenteditable='true']"
+        ],
+        "mainContent": [
+          "div.ds-assistant-message-main-content",
+          "div[class*='assistant-message-main-content']",
+          "div[class*='message-main-content']"
+        ],
+        "sendButton": [
+          "div[role='button'][aria-disabled='false'] svg",
+          "button[type='submit']"
+        ],
+        "stopButton": [
+          "div[role='button']:has-text('停止')",
+          "button:has-text('停止生成')",
+          "button[aria-label*='停止']"
+        ],
+        "assistant": [
+          "div.ds-assistant-message-main-content",
+          "div[class*='ds-markdown']",
+          "div[class*='markdown']"
+        ]
+      }
+    },
+    "local": {
+      "label": "本地模型（Ollama / 任意 OpenAI 兼容服务）",
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "model": "qwen3:8b",
+      "apiKey": "ollama",
+      "temperature": 0.3,
+      "maxTokens": 2400
+    }
+  }
+}

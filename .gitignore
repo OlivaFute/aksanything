@@ -1,23 +1,32 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-files
-*.bclicense
-*.flf
-#Test results file
-TestResults.xml
+# ---------------------------------------------------------------
+# 依赖
+# ---------------------------------------------------------------
+node_modules/
+
+# ---------------------------------------------------------------
+# 运行时缓存（全部可随时删除，服务会自动重建）
+#   ms-playwright/    Chromium 内核，首次用「浏览器桥接」时按需下载
+#   browser-profile/  桥接的登录态，含账号会话，绝不入库
+#   shots/            自检截图
+# ---------------------------------------------------------------
+.cache/
+
+# ---------------------------------------------------------------
+# 本地 AI 协作记录（开发日志 / 会话记忆，含本机路径，不入库）
+# ---------------------------------------------------------------
+.workbuddy/
+
+# ---------------------------------------------------------------
+# 密钥：配置文件里 apiKey 一律留空，走环境变量
+#   如果你更习惯把 key 写在本地文件里，取消下面两行的注释
+# ---------------------------------------------------------------
+# ask.config.local.json
+# *.key
+
+# ---------------------------------------------------------------
+# 系统杂物
+# ---------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+*.log

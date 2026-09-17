@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+:root{
+  --ink:#1a1a1a; --ink-2:#4a4a4a; --ink-3:#8a877f;
+  --rule:#d8d5cd; --paper:#fdfcfa; --accent:#8c2f1f; --box:#f4f2ed;
+  --bar-h:46px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:#e9e7e1;color:var(--ink);
+     font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+     -webkit-font-smoothing:antialiased}
+
+/* ---- 顶部工具栏 ---- */
+.pdfx-bar{position:fixed;left:0;right:0;top:0;height:var(--bar-h);z-index:20;
+  display:flex;align-items:center;gap:12px;padding:0 14px;
+  background:var(--paper);border-bottom:1px solid var(--rule)}
+.pdfx-back{color:var(--accent);text-decoration:none;font-size:13px;flex:0 0 auto;letter-spacing:.02em}
+.pdfx-back:hover{text-decoration:underline}
+.pdfx-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Songti SC",serif;
+  font-size:14.5px;font-weight:600}
+.pdfx-tools{display:flex;align-items:center;gap:5px;flex:0 0 auto;color:var(--ink-2)}
+.pdfx-tools button{background:none;border:1px solid var(--rule);border-radius:5px;
+  width:26px;height:26px;padding:0;cursor:pointer;color:var(--ink-2);
+  font-size:13px;line-height:1;font-family:inherit}
+.pdfx-tools button:hover:not(:disabled){border-color:var(--ink-3);background:var(--box);color:var(--ink)}
+.pdfx-tools button:disabled{opacity:.35;cursor:default}
+.pdfx-page,.pdfx-zoom{font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:12px;color:var(--ink-3);text-align:center}
+.pdfx-page{min-width:74px}
+.pdfx-zoom{min-width:46px}
+
+/* ---- 目录侧栏 ---- */
+.pdfx-tocbtn{flex:0 0 auto;background:none;border:1px solid var(--rule);border-radius:5px;
+  padding:3px 9px;font-size:12.5px;color:var(--ink-2);cursor:pointer;font-family:inherit;
+  white-space:nowrap}
+.pdfx-tocbtn:hover:not(:disabled){border-color:var(--ink-3);background:var(--box);color:var(--ink)}
+.pdfx-tocbtn:disabled{opacity:.35;cursor:default}
+.pdfx-tocbtn.on{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.pdfx-toc{position:fixed;top:var(--bar-h);left:0;bottom:0;width:330px;z-index:30;
+  background:var(--paper);border-right:1px solid var(--rule);
+  transform:translateX(-103%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+  display:flex;flex-direction:column;box-shadow:6px 0 22px rgba(0,0,0,.06)}
+.pdfx-toc.open{transform:none}
+.pdfx-toc-head{display:flex;align-items:center;gap:8px;padding:10px 8px 10px 13px;
+  border-bottom:1px solid var(--rule);flex:0 0 auto;
+  font-size:12.5px;font-weight:600;color:var(--ink-2);letter-spacing:.02em}
+.pdfx-toc-head span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pdfx-toc-head button{background:none;border:0;font-size:17px;line-height:1;color:var(--ink-3);
+  cursor:pointer;padding:1px 6px;border-radius:3px;font-family:inherit}
+.pdfx-toc-head button:hover{background:var(--box);color:var(--ink)}
+.pdfx-toc-body{flex:1;overflow-y:auto;padding:6px 0 24px}
+.pdfx-toc-empty{padding:16px 15px;font-size:12.5px;color:var(--ink-3);line-height:1.75}
+.pdfx-toc-item{display:block;width:100%;text-align:left;background:none;border:0;cursor:pointer;
+  font-family:inherit;font-size:12.5px;line-height:1.45;color:var(--ink-2);
+  padding:5px 12px 5px 0;border-left:2px solid transparent}
+.pdfx-toc-item:hover{background:var(--box);color:var(--ink)}
+.pdfx-toc-item.cur{border-left-color:var(--accent);color:var(--accent);font-weight:600;
+  background:rgba(140,47,31,.05)}
+.pdfx-toc-pg{float:right;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;
+  color:var(--ink-3);margin-left:8px}
+.pdfx-mask{position:fixed;top:var(--bar-h);left:0;right:0;bottom:0;
+  background:rgba(0,0,0,.15);z-index:25;display:none}
+.pdfx-mask.on{display:block}
+
+/* ---- 页面区 ---- */
+.pdfx-view{padding:calc(var(--bar-h) + 18px) 20px 48px}
+.pdfx-page-box{margin:0 auto 16px;background:#fff;position:relative;
+  box-shadow:0 1px 6px rgba(0,0,0,.13)}
+.pdfx-page-box canvas{position:absolute;left:0;top:0;display:block}
+/* 文本层：--scale-factor 必须由脚本设成 viewport.scale，否则 span 完全不定位 */
+.pdfx-text{position:absolute;inset:0;overflow:hidden;line-height:1;
+  text-align:initial;text-size-adjust:none;transform-origin:0 0;z-index:2}
+.pdfx-text span{color:transparent;position:absolute;white-space:pre;
+  transform-origin:0% 0%;cursor:text}
+.pdfx-text span::selection{background:rgba(140,47,31,.28)}
+.pdfx-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:#c9c6be;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+
+.pdfx-msg{max-width:640px;margin:56px auto;padding:16px 20px;background:var(--paper);
+  border:1px solid var(--rule);border-radius:6px;font-size:13.5px;line-height:1.75;color:var(--ink-2)}
+.pdfx-msg b{color:var(--accent);font-weight:600}
+.pdfx-msg code{font-family:ui-monospace,Menlo,monospace;font-size:.9em;background:var(--box);
+  border:1px solid var(--rule);border-radius:3px;padding:1px 5px}
+
+/* 轻提示（跳章成功的反馈等） */
+.pdfx-toast{position:fixed;left:50%;bottom:34px;transform:translate(-50%,14px);z-index:60;
+  max-width:80vw;padding:9px 16px;border-radius:6px;background:#1a1a1a;color:#fdfcfa;
+  font-size:12.5px;line-height:1.5;opacity:0;pointer-events:none;
+  transition:opacity .22s ease,transform .22s ease;box-shadow:0 6px 20px rgba(0,0,0,.2)}
+.pdfx-toast.on{opacity:1;transform:translate(-50%,0)}
+
+@media print{.pdfx-bar{display:none}.pdfx-view{padding-top:0}}
+</style>
+</head>
+<body>
+
+<div class="pdfx-bar">
+  <a class="pdfx-back" href="/" title="回到教学工坊">← 课程</a>
+  <button class="pdfx-tocbtn" id="pdfx-toc-btn" type="button" disabled
+          title="按 PDF 书签跳转章节">☰ 目录</button>
+  <span class="pdfx-title">{{TITLE}}</span>
+  <span class="pdfx-tools">
+    <button id="pdfx-prev" type="button" title="上一页">‹</button>
+    <span class="pdfx-page" id="pdfx-page">– / –</span>
+    <button id="pdfx-next" type="button" title="下一页">›</button>
+    <button id="pdfx-zoom-out" type="button" title="缩小">−</button>
+    <span class="pdfx-zoom" id="pdfx-zoom">100%</span>
+    <button id="pdfx-zoom-in" type="button" title="放大">+</button>
+  </span>
+</div>
+
+<aside class="pdfx-toc" id="pdfx-toc" aria-hidden="true">
+  <div class="pdfx-toc-head">
+    <span id="pdfx-toc-title">文献目录</span>
+    <button id="pdfx-toc-close" type="button" title="收起">×</button>
+  </div>
+  <div class="pdfx-toc-body" id="pdfx-toc-body"></div>
+</aside>
+<div class="pdfx-mask" id="pdfx-mask"></div>
+
+<div class="pdfx-view" id="pdfx-view">
+  <div class="pdfx-msg" id="pdfx-boot">正在加载 PDF…</div>
+</div>
+
+<script>window.__PDF_DOC__={{DOC_JSON}};</script>
+<script src="/assets/pdfjs/pdf.min.js"></script>
+<script src="/assets/pdf-reader.js"></script>
+<script>window.__ASK__={{ASK_JSON}};</script>
+<script src="/assets/ask-ai.js"></script>
+
+</body>
+</html>
