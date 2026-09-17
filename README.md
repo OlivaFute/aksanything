@@ -13,7 +13,7 @@ git clone https://github.com/OlivaFute/aksanything.git
 cd aksanything
 ```
 
-仓库里**不含任何密钥**，也不含作者的本地路径，拿到手要先做两件事（都写在 `ask.config.json`；也可以启动后打开 <http://127.0.0.1:8899/config> 图形化修改）：
+手要先做两件事（都写在 `ask.config.json`；也可以启动后打开 <http://127.0.0.1:8899/config> 图形化修改）：
 
 1. **指定工作区** —— `workspace` 填课程目录的绝对路径（就是 `lessons/` 所在的那一层）。留空时会退回工具目录的上一级。
 2. **配一个 AI 通道** —— 三选一，见下方 provider 表。仓库里的 `providers.api.apiKey` 是**空的**，默认设计成读环境变量，这样 key 永远不会进 Git：
